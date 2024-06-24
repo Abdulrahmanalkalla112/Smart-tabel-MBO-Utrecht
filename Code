@@ -1,0 +1,213 @@
+import os
+import time
+import pygame
+from pygame.locals import *
+import platform
+import subprocess
+import tkinter as tk
+from tkinter import messagebox
+import random
+from PIL import Image, ImageTk
+
+# Constants and Configuration
+PHOTO_DIR = "memorygamepics"
+IDLE_TIME_THRESHOLD = 60  # Idle time in seconds (1 minute)
+SHUTDOWN_GPIO_PIN = 17
+USE_GPIO = False
+SLIDESHOW_DELAY = 5  # Delay between images in the slideshow in seconds
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
+
+# GPIO Setup (Raspberry Pi specific)
+try:
+    from gpiozero import Button
+    from signal import pause
+
+    def setup_shutdown_button():
+        shutdown_button = Button(SHUTDOWN_GPIO_PIN, pull_up=True)
+        shutdown_button.when_pressed = shutdown
+        global USE_GPIO
+        USE_GPIO = True
+
+    def shutdown():
+        print("Shutdown button pressed! Shutting down...")
+        os.system("sudo shutdown -h now")
+
+except ImportError:
+    def setup_shutdown_button():
+        print("gpiozero not available, skipping GPIO setup.")
+
+def minimize_all_windows():
+    """Minimize all windows on the system."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import ctypes
+            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 6)
+            subprocess.call('powershell -command "& { [void] [System.Reflection.Assembly]::LoadWithPartialName(\'System.Windows.Forms\'); [System.Windows.Forms.SendKeys]::SendWait(\'%{TAB}\') }"')
+        elif system == "Darwin":  # macOS
+            applescript = '''
+            tell application "System Events"
+                keystroke "h" using {command down, option down}
+            end tell
+            '''
+            subprocess.Popen(['osascript', '-e', applescript])
+        elif system == "Linux":
+            subprocess.call(["xdotool", "getactivewindow", "windowminimize"])
+        else:
+            print("Unsupported OS")
+    except Exception as e:
+        print(f"Error minimizing windows: {e}")
+
+def get_images(photo_dir):
+    """Get list of image file paths from the specified directory."""
+    try:
+        return [os.path.join(photo_dir, f) for f in os.listdir(photo_dir) if f.endswith(IMAGE_EXTENSIONS)]
+    except Exception as e:
+        print(f"Error loading images from {photo_dir}: {e}")
+        return []
+
+def run_slideshow():
+    """Run a fullscreen slideshow of images from the specified directory."""
+    pygame.init()
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Photo Slideshow")
+
+    images = get_images(PHOTO_DIR)
+    if not images:
+        print("No images found in the directory.")
+        return
+
+    clock = pygame.time.Clock()
+    idle_start_time = time.time()
+    current_image = 0
+    slideshow_active = False
+
+    while True:
+        for event in pygame.event.get():
+            if event.type in [KEYDOWN, MOUSEBUTTONDOWN, MOUSEMOTION]:
+                idle_start_time = time.time()
+                if slideshow_active:
+                    slideshow_active = False
+                    pygame.quit()
+                    minimize_all_windows()
+                    return
+
+            if event.type == QUIT:
+                pygame.quit()
+                return
+
+        idle_time = time.time() - idle_start_time
+
+        if idle_time > IDLE_TIME_THRESHOLD and not slideshow_active:
+            minimize_all_windows()
+            slideshow_active = True
+
+        if slideshow_active:
+            screen.fill((0, 0, 0))
+            img = pygame.image.load(images[current_image])
+            img = pygame.transform.scale(img, screen.get_size())
+            img_rect = img.get_rect(center=screen.get_rect().center)
+            screen.blit(img, img_rect)
+            pygame.display.flip()
+
+            current_image = (current_image + 1) % len(images)
+            time.sleep(SLIDESHOW_DELAY)  # Delay between images in slideshow
+
+        clock.tick(30)
+
+class MemoryGame:
+    """Class for a memory game using tkinter."""
+    def _init_(self, master, images):
+        self.master = master
+        self.images = images * 2
+        random.shuffle(self.images)
+        self.buttons = []
+        self.first = None
+        self.second = None
+        self.can_click = True
+        self.create_widgets()
+
+    def create_widgets(self):
+        """Create the game buttons."""
+        for row in range(2):
+            for col in range(5):
+                index = row * 5 + col
+                button = tk.Button(self.master, text='?', width=10, height=5, command=lambda idx=index: self.clicked(idx))
+                button.grid(row=row, column=col)
+                self.buttons.append(button)
+
+    def load_image(self, index):
+        """Load an image for the button."""
+        try:
+            image_filename = self.images[index]
+            image_path = os.path.join(PHOTO_DIR, image_filename)
+            image = Image.open(image_path)
+            image = image.resize((100, 100), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            return photo
+        except Exception as e:
+            print(f"Error loading image {index}: {e}")
+            return None
+
+    def clicked(self, index):
+        """Handle button click event."""
+        if not self.can_click:
+            return
+
+        button = self.buttons[index]
+
+        if button['text'] != '?' or self.first == index:
+            return
+
+        photo = self.load_image(index)
+        if photo:
+            button.config(image=photo, text='', width=100, height=100)
+            button.image = photo  # to prevent garbage collection
+
+            if self.first is None:
+                self.first = index
+            else:
+                self.second = index
+                self.can_click = False
+                self.master.after(1000, self.check_match)
+
+    def check_match(self):
+        """Check if the two selected buttons match."""
+        if self.images[self.first] == self.images[self.second]:
+            messagebox.showinfo("Match", "Match gevonden!")
+            self.buttons[self.first]['state'] = 'disabled'
+            self.buttons[self.second]['state'] = 'disabled'
+        else:
+            self.buttons[self.first].config(text='?', image='', width=10, height=5)
+            self.buttons[self.second].config(text='?', image='', width=10, height=5)
+        self.first = None
+        self.second = None
+        self.can_click = True
+
+def main():
+    """Main function to choose between slideshow and memory game."""
+    def start_slideshow():
+        root.destroy()
+        run_slideshow()
+
+    def start_memory_game():
+        root.destroy()
+        root_game = tk.Tk()
+        root_game.title("Memory Game with Images")
+        images = ['apple.jpg', 'banana.png', 'peach.png', 'pear.jpg', 'prune.jpg']
+        game = MemoryGame(root_game, images)
+        root_game.mainloop()
+
+    setup_shutdown_button()
+
+    root = tk.Tk()
+    root.title("Main Menu")
+    tk.Label(root, text="Choose an option:").pack(pady=10)
+    tk.Button(root, text="Start Slideshow", command=start_slideshow).pack(pady=10)
+    tk.Button(root, text="Start Memory Game", command=start_memory_game).pack(pady=10)
+    root.mainloop()
+
+if _name_ == "_main_":
+    main()
+    if USE_GPIO:
+        pause()  # Wait indefinitely for button press if running on Raspberry Pi
